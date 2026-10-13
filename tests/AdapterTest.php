@@ -184,4 +184,85 @@ final class AdapterTest extends TestCase
             $this->assertSame(['nobody awaits'], $seen);
         });
     }
+
+    public function testDriverIsDecoratedOnce(): void
+    {
+        \FiberInterop\Revolt\Adapter::decorateDriver();
+        \FiberInterop\Revolt\Adapter::decorateDriver();
+        $driver = EventLoop::getDriver();
+        $this->assertInstanceOf(\FiberInterop\Revolt\ActivatingDriver::class, $driver);
+        $this->assertNotInstanceOf(\FiberInterop\Revolt\ActivatingDriver::class, $driver->inner);
+    }
+
+    public function testScopeActivatedOnCallback(): void
+    {
+        $seen = null;
+        run(function () use (&$seen) {
+            $scope = new \Scope();
+            $scope->run(function () use (&$seen) {
+                $_GET = ['v' => 'inner'];
+                EventLoop::delay(0.001, function () use (&$seen) { $seen = $_GET; });
+            });
+            $this->assertSame([], $_GET); // back in the root scope
+            sleep(0.02);
+        });
+        $this->assertSame(['v' => 'inner'], $seen);
+    }
+
+    public function testScopeActivatedOnResume(): void
+    {
+        $seen = [];
+        run(function () use (&$seen) {
+            $tasks = [];
+            foreach (['a', 'b'] as $n) {
+                $tasks[] = go(function () use ($n, &$seen) {
+                    (new \Scope())->run(function () use ($n, &$seen) {
+                        $_GET = ['v' => $n];
+                        $s = EventLoop::getSuspension();
+                        EventLoop::delay($n === 'a' ? 0.02 : 0.01, fn() => $s->resume());
+                        $s->suspend();
+                        $seen[$n] = $_GET['v'] ?? null;
+                    });
+                });
+            }
+            await_all($tasks);
+        });
+        $this->assertSame(['b' => 'b', 'a' => 'a'], $seen);
+    }
+
+    public function testScopeActivatedOnReturnToMain(): void
+    {
+        $_GET = ['root' => 1];
+        EventLoop::queue(static function () {
+            (new \Scope())->run(static function () {
+                $_GET = ['v' => 'inner'];
+                $s = EventLoop::getSuspension();
+                EventLoop::delay(0.001, fn() => $s->resume());
+                $s->suspend();
+                // leave the scope while still inside the loop: the next thing to run is {main} again
+            });
+        });
+        EventLoop::run();
+        $this->assertSame(['root' => 1], $_GET);
+        $_GET = [];
+    }
+
+    public function testNoSwapWhenScopeUnchanged(): void
+    {
+        run(function () {
+            (new \Scope())->run(function () {
+                $_GET = ['m' => 1];
+                $s = EventLoop::getSuspension();
+                EventLoop::delay(0.001, function () use ($s) {
+                    $_GET['m']++; // live value written between activations must not be overwritten by a stale swap
+                    $s->resume();
+                });
+                $s->suspend();
+                $this->assertSame(['m' => 2], $_GET);
+                EventLoop::queue(fn() => $this->assertSame(['m' => 2], $_GET));
+                sleep(0.001);
+                $this->assertSame(['m' => 2], $_GET);
+            });
+        });
+    }
 }

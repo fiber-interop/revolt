@@ -25,6 +25,19 @@ final class Adapter implements \async\Adapter
     {
         $this->own = new \WeakMap();
         $this->services = new \WeakMap();
+        self::decorateDriver();
+    }
+
+    /**
+     * Wrap the Revolt driver in ActivatingDriver (once), so code using Revolt or Amp directly is covered too.
+     * Called when the package is autoloaded and again from the constructor; not possible while the loop runs.
+     */
+    public static function decorateDriver(): void
+    {
+        $driver = EventLoop::getDriver();
+        if (!$driver instanceof ActivatingDriver && !$driver->isRunning()) {
+            EventLoop::setDriver(new ActivatingDriver($driver));
+        }
     }
 
     /** @var \WeakMap<\Fiber, true> fibers created by service(): their watchers are unreferenced */
@@ -227,6 +240,10 @@ final class Adapter implements \async\Adapter
             }
         }
 
+        if (!$suspend) {
+            ActivatingDriver::activate(); // in-place wait returned inside the foreign fiber
+        }
+
         [$ok, $value] = $result;
         if (!$ok) {
             throw $value;
@@ -248,6 +265,7 @@ final class Adapter implements \async\Adapter
     private function driveInPlace(bool &$done, bool &$nested): void
     {
         $driver = EventLoop::getDriver();
+        $driver instanceof ActivatingDriver && $driver = $driver->inner;
         $ref = new \ReflectionClass(\Revolt\EventLoop\Internal\AbstractDriver::class);
         $loopFiber = $ref->getProperty('fiber')->getValue($driver);
         if ($loopFiber->isRunning()) {
@@ -255,7 +273,7 @@ final class Adapter implements \async\Adapter
             $this->driveNested($driver, $ref, $done);
             return;
         }
-        $run = (new \ReflectionProperty(DriverSuspension::class, 'run'))->getValue(EventLoop::getSuspension());
+        $run = (new \ReflectionProperty(DriverSuspension::class, 'run'))->getValue($driver->getSuspension());
         while (!$done) {
             $interrupt = $run();
             if ($interrupt !== null) {

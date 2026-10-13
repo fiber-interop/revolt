@@ -60,6 +60,36 @@ Revolt 1.x internals) and returns when the awaited thing completes, without susp
 * In-place waiting on an `Amp\Future` observes it through `map()/catch()` instead of `Future::await()`.
 * Waiting with nothing scheduled in place throws `LogicException('Deadlock ...')`. In {main}, Revolt itself throws.
 
+## Scope state
+
+Per-scope superglobals (`$_GET`, `$_POST`, `$_COOKIE`, `$_FILES`) follow `fiber-interop/scope`: the adapter
+calls `fiber_interop\scope\activate()` (lazy, a swap only on a real scope change) whenever the loop hands
+control to user code. The call sites live in `FiberInterop\Revolt\ActivatingDriver`, a decorator around the
+Revolt driver installed with `EventLoop::setDriver()` when the package is autoloaded (and again, idempotently,
+from the `Adapter` constructor; it cannot be installed while the loop is running):
+
+* every callback registered through `defer/delay/repeat/onReadable/onWritable/onSignal/queue` is wrapped so it
+  runs in the `Scope` that was current at registration (`Scope::run()` activates on entry and exit);
+* the `Suspension` returned by `getSuspension()` calls `activate()` right after `suspend()` returns, i.e. first
+  thing in the resumed fiber;
+* `run()` calls `activate()` after the inner `run()` returns, so {main} sees its own scope again;
+* the in-place wait (foreign fibers) calls `activate()` when it returns inside the foreign fiber.
+
+Because this sits in the driver, code that uses Revolt or Amp directly is covered, not only code going through
+`async\`. The in-place driving (`driveNested`) still uses reflection on `AbstractDriver`; the decorator cannot
+replace it because the work is calling the driver's private `tick()`/`invokeCallbacks()`, so it stays as is.
+
+Probes (`php probes/<name>.php`, each prints `ok`):
+
+* `scope-api.php` passes: two scopes interleaved with `async\sleep()` keep their own `$_GET`; root is restored.
+* `scope-loop.php` passes: the same scenario with `EventLoop::delay` + `Suspension`, and with `Amp\async` +
+  `Amp\delay`, without any `async\` call. It only passes because of the decorator.
+* `scope-raw-fiber.php` passes: a plain `new Fiber` inside a scope reads the creator's `$_GET` before and after
+  a bare `Fiber::suspend()`. This is the polyfill's "most recently current" fallback, not something the adapter does.
+
+Callbacks registered *before* the package was loaded (or on a driver replaced later with `EventLoop::setDriver()`)
+are not wrapped.
+
 ## Tests
 
     composer install
