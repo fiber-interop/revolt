@@ -24,9 +24,27 @@ final class Adapter implements \async\Adapter
     public function __construct()
     {
         $this->own = new \WeakMap();
+        $this->services = new \WeakMap();
     }
 
+    /** @var \WeakMap<\Fiber, true> fibers created by service(): their watchers are unreferenced */
+    private \WeakMap $services;
+
     public function go(\Closure $f): object
+    {
+        return $this->spawn($f, false);
+    }
+
+    /**
+     * A service is a task whose watchers are unreferenced (EventLoop::unreference), so a sleeping
+     * or I/O-waiting service never keeps the loop, and thus the outermost run(), alive.
+     */
+    public function service(\Closure $f): object
+    {
+        return $this->spawn($f, true);
+    }
+
+    private function spawn(\Closure $f, bool $service): Task
     {
         $task = new Task();
         $scope = \Scope::getCurrent();
@@ -44,6 +62,7 @@ final class Adapter implements \async\Adapter
             }
         });
         $this->own[$fiber] = true;
+        $service && $this->services[$fiber] = true;
         EventLoop::queue(static fn() => $scope->run(static fn() => $fiber->start()));
         return $task;
     }
@@ -92,7 +111,9 @@ final class Adapter implements \async\Adapter
         try {
             return $future->await($cancellation);
         } catch (\Amp\CancelledException $e) {
-            if ($e->getPrevious() instanceof \Amp\TimeoutException) {
+            // Only our own TimeoutCancellation is a Timeout; any other CancelledException (even one caused by
+            // a TimeoutCancellation inside the awaited future) is a Cancelled.
+            if ($cancellation !== null && $cancellation->isRequested() && $e->getPrevious() instanceof \Amp\TimeoutException) {
                 throw new Timeout(\sprintf('Timed out after %.3fs', $timeout), 0, $e);
             }
             throw new Cancelled($e->getMessage(), 0, $e);
@@ -155,12 +176,13 @@ final class Adapter implements \async\Adapter
         $scope = \Scope::getCurrent();
         $suspension = $suspend ? EventLoop::getSuspension() : null;
         $done = false;
+        $nested = false;
         $suspended = false;
         $result = null;
         $cancel = null;
         $timer = null;
 
-        $settle = static function (bool $ok, mixed $value) use (&$done, &$suspended, &$result, &$cancel, &$timer, $suspension): void {
+        $settle = static function (bool $ok, mixed $value) use (&$done, &$nested, &$suspended, &$result, &$cancel, &$timer, $suspension): void {
             if ($done) {
                 return;
             }
@@ -174,13 +196,15 @@ final class Adapter implements \async\Adapter
             }
             if ($suspension !== null) {
                 $suspended && $suspension->resume();
-            } else {
+            } elseif (!$nested) {
                 EventLoop::stop(); // let the in-place driver loop return
             }
         };
         $inScope = static fn(\Closure $cb): \Closure => static fn(...$a) => $scope->run($cb, ...$a);
         $scoped = static fn(bool $ok, mixed $value) => $scope->run($settle, $ok, $value);
 
+        $service = ($fiber = \Fiber::getCurrent()) !== null && isset($this->services[$fiber]);
+        $before = $service ? EventLoop::getIdentifiers() : [];
         $cancel = $subscribe($scoped);
         if (!$done && $timeout !== \PHP_FLOAT_MAX) {
             $timer = EventLoop::delay(\max(0.0, $timeout), $inScope(static fn() => $settle(
@@ -188,13 +212,18 @@ final class Adapter implements \async\Adapter
                 new Timeout(\sprintf('Timed out after %.3fs', $timeout)),
             )));
         }
+        if ($service) {
+            foreach (\array_diff(EventLoop::getIdentifiers(), $before) as $id) {
+                EventLoop::unreference($id);
+            }
+        }
 
         if (!$done) {
             if ($suspension !== null) {
                 $suspended = true;
                 $suspension->suspend();
             } else {
-                $this->driveInPlace($done);
+                $this->driveInPlace($done, $nested);
             }
         }
 
@@ -206,26 +235,54 @@ final class Adapter implements \async\Adapter
     }
 
     /**
-     * Run the loop from inside a fiber nobody owns. EventLoop::run() refuses to run inside a fiber, so
-     * resume the driver's loop fiber through the same closure DriverSuspension uses for {main}.
+     * Run the loop from inside a fiber nobody owns.
+     *
+     * EventLoop::run() refuses to run inside a fiber, so there are two cases:
+     *  - the driver's loop fiber is not running (we are in {main}'s call stack, e.g. a foreign fiber started
+     *    from {main}): resume it through the closure DriverSuspension uses for {main}.
+     *  - the loop fiber is running (the foreign fiber was started from a task, so Revolt is an ancestor on
+     *    the stack and cannot be resumed): run the driver's own tick/invokeCallbacks by hand from here, on
+     *    a fresh callback fiber (the current one is an ancestor on the stack too).
+     *    See driveNested().
      */
-    private function driveInPlace(bool &$done): void
+    private function driveInPlace(bool &$done, bool &$nested): void
     {
         $driver = EventLoop::getDriver();
+        $ref = new \ReflectionClass(\Revolt\EventLoop\Internal\AbstractDriver::class);
+        $loopFiber = $ref->getProperty('fiber')->getValue($driver);
+        if ($loopFiber->isRunning()) {
+            $nested = true;
+            $this->driveNested($driver, $ref, $done);
+            return;
+        }
         $run = (new \ReflectionProperty(DriverSuspension::class, 'run'))->getValue(EventLoop::getSuspension());
         while (!$done) {
-            try {
-                $interrupt = $run();
-            } catch (\FiberError $e) {
-                // The driver's loop fiber is the one currently executing (we were resumed by a Revolt callback).
-                throw new \LogicException('fiber-interop/revolt: cannot wait in place from a fiber nobody owns while the Revolt loop is running it', 0, $e);
-            }
+            $interrupt = $run();
             if ($interrupt !== null) {
                 $interrupt(); // an uncaught callback exception surfaces here, as with EventLoop::run()
             }
             if (!$done && $driver->getIdentifiers() === []) {
                 throw new \LogicException('Deadlock: waiting with nothing scheduled');
             }
+        }
+    }
+
+    private function driveNested(object $driver, \ReflectionClass $ref, bool &$done): void
+    {
+        $prop = static fn(string $n) => $ref->getProperty($n)->getValue($driver);
+        $call = static fn(string $n, mixed ...$a) => $ref->getMethod($n)->invoke($driver, ...$a);
+        $tick = new \ReflectionMethod($driver, 'tick');
+        $call('createCallbackFiber');
+        while (!$done) {
+            $call('invokeCallbacks');
+            if ($done) {
+                return;
+            }
+            if ($driver->getIdentifiers() === []) {
+                throw new \LogicException('Deadlock: waiting with nothing scheduled');
+            }
+            $idle = $prop('microtaskQueue')->isEmpty() && $prop('callbackQueue')->isEmpty();
+            $tick->invoke($driver, $idle);
         }
     }
 }
