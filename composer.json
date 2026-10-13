@@ -5,7 +5,7 @@
     "license": "MIT",
     "require": {
         "php": "^8.1",
-        "fiber-interop/api": "*",
+        "fiber-interop/api": "^0.1",
         "revolt/event-loop": "^1.0"
     },
     "require-dev": {
@@ -17,18 +17,22 @@
         "amphp/amp": "await() accepts Amp\\Future natively",
         "react/promise": "await() accepts React promises natively"
     },
-    "repositories": [
-        { "type": "path", "url": "../api" },
-        { "type": "path", "url": "../scope" }
-    ],
     "minimum-stability": "dev",
     "prefer-stable": true,
     "autoload": {
-        "psr-4": { "FiberInterop\\Revolt\\": "src/" },
-        "files": ["src/register.php"]
+        "psr-4": {
+            "FiberInterop\\Revolt\\": "src/"
+        },
+        "files": [
+            "src/register.php"
+        ]
     },
     "autoload-dev": {
-        "psr-4": { "FiberInterop\\Revolt\\Tests\\": "tests/" }
+        "psr-4": {
+            "FiberInterop\\Revolt\\Tests\\": "tests/"
+        }
     },
-    "config": { "allow-plugins": {} }
+    "config": {
+        "allow-plugins": {}
+    }
 }
