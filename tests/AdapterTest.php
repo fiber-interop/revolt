@@ -33,6 +33,18 @@ final class AdapterTest extends TestCase
         });
     }
 
+    public function testLocalCloseInCallbackRecoversWithoutTimer(): void
+    {
+        run(function () {
+            [$a, $b] = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
+            $t = go(function () use ($a) { readable($a); return 'woken'; });
+            sleep(0.001);
+            // Closed from inside a loop callback; the loop selects again immediately afterwards.
+            EventLoop::defer(static function () use ($a) { fclose($a); });
+            $this->assertSame('woken', await($t));
+        });
+    }
+
     public function testAmpFutureAwait(): void
     {
         run(function () {

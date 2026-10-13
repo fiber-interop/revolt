@@ -70,12 +70,7 @@ final class Adapter implements \async\Adapter
         $scope = \Scope::getCurrent();
         $fiber = new \Fiber(function () use ($f, $task, $scope): void {
             try {
-                try {
-                    $result = $scope->run($f);
-                } finally {
-                    ActivatingDriver::$sweep !== null && (ActivatingDriver::$sweep)(); // the task may have closed a waited stream
-                }
-                $task->settle(true, $result);
+                $task->settle(true, $scope->run($f));
             } catch (\Throwable $e) {
                 $task->settle(false, $e);
                 // Give an awaiter a chance to attach; if nobody did, the loop's error handler sees it.
@@ -173,11 +168,11 @@ final class Adapter implements \async\Adapter
             $id = EventLoop::$method($resource, static fn() => $settle(true, null));
             $key = $this->streamSeq++;
             $this->streamWaits[$key] = ['resource' => $resource, 'settle' => $settle];
-            // A local fclose() raises no event: while stream waits are pending, re-check every ~10 ms.
+            // A local fclose() raises no event: while stream waits are pending, re-check every ~20 ms.
             if ($this->sweeper === null) {
-                $this->sweeper = EventLoop::repeat(0.01, $this->sweepClosed(...));
+                $this->sweeper = EventLoop::repeat(0.02, $this->sweepClosed(...));
                 EventLoop::unreference($this->sweeper);
-                ActivatingDriver::$sweep = $this->sweepClosed(...);
+                ActivatingDriver::$recover = $this->recoverFromDeadStream(...);
             }
             return function () use ($id, $key): void {
                 unset($this->streamWaits[$key]);
@@ -188,10 +183,20 @@ final class Adapter implements \async\Adapter
                 if ($this->streamWaits === [] && $this->sweeper !== null) {
                     EventLoop::cancel($this->sweeper);
                     $this->sweeper = null;
-                    ActivatingDriver::$sweep = null;
+                    ActivatingDriver::$recover = null;
                 }
             };
         }, $timeout);
+    }
+
+    /** stream_select() met a closed resource: sweep once so the loop can run again. */
+    private function recoverFromDeadStream(\Throwable $e): bool
+    {
+        if (!\str_contains($e->getMessage(), 'not a valid stream resource') && !\str_contains($e->getMessage(), 'No stream arrays')) {
+            return false;
+        }
+        $this->sweepClosed();
+        return true;
     }
 
     /** Wake the waiters of resources that were closed or destroyed; their waits return normally. */
@@ -320,11 +325,14 @@ final class Adapter implements \async\Adapter
         }
         $run = (new \ReflectionProperty(DriverSuspension::class, 'run'))->getValue($driver->getSuspension());
         while (!$done) {
-            $this->sweepClosed();
-            if ($done) {
-                break;
+            try {
+                $interrupt = $run();
+            } catch (\TypeError | \ValueError $e) {
+                if (!$this->recoverFromDeadStream($e)) {
+                    throw $e;
+                }
+                continue;
             }
-            $interrupt = $run();
             if ($interrupt !== null) {
                 $interrupt(); // an uncaught callback exception surfaces here, as with EventLoop::run()
             }
@@ -348,12 +356,14 @@ final class Adapter implements \async\Adapter
             if ($driver->getIdentifiers() === []) {
                 throw new \LogicException('Deadlock: waiting with nothing scheduled');
             }
-            $this->sweepClosed();
-            if ($done) {
-                return;
-            }
             $idle = $prop('microtaskQueue')->isEmpty() && $prop('callbackQueue')->isEmpty();
-            $tick->invoke($driver, $idle);
+            try {
+                $tick->invoke($driver, $idle);
+            } catch (\TypeError | \ValueError $e) {
+                if (!$this->recoverFromDeadStream($e)) {
+                    throw $e;
+                }
+            }
         }
     }
 }

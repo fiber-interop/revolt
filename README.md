@@ -43,10 +43,19 @@ with the Revolt-backed loop) so both share one driver.
 
 ## Semantics: closing a stream
 
-`fclose()` (or destroying the resource) while fibers wait in `readable()`/`writable()` wakes them within ~10 ms and
-the waits return normally; the next operation on the closed resource fails. Mechanism: while any stream wait is
-pending, an unreferenced `EventLoop::repeat()` (10 ms) runs `is_resource()` on each waited stream; for a gone one
-it cancels the watcher (errors ignored) and resumes its waiters. The same sweep also runs after every callback/task body and before every suspend, so a stream closed by the loop's own code is handled before the loop polls it (`stream_select` must never see a closed resource). No timer or hook exists when no stream wait is pending.
+`fclose()` (or destroying the resource) while fibers wait in `readable()`/`writable()` wakes them within ~20 ms and
+the waits return normally; the next operation on the closed resource fails. Two parts:
+
+- A timer: while any stream wait is pending, an unreferenced `EventLoop::repeat()` (20 ms) runs `is_resource()` on each
+  waited stream; for a gone one it cancels the watcher (errors ignored) and resumes its waiters. No timer exists when
+  no stream wait is pending. This bounds the wake-up at 20 ms (and covers the ev/uv drivers, which never raise).
+- Recovery: if a stream is closed inside a callback and the loop selects before the timer fires, Revolt's
+  `StreamSelectDriver` lets PHP's `stream_select()` fail (`TypeError` "supplied resource is not a valid stream
+  resource", or `ValueError` "No stream arrays were passed" when the dead stream was the only one). The decorating driver
+  catches exactly that from `run()`, from {main}'s suspension and from the in-place drivers, sweeps once, and runs the
+  loop again.
+
+No work is done per callback, per suspend or per loop iteration.
 
 ## Limitations: the in-place rule
 
