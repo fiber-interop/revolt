@@ -70,7 +70,12 @@ final class Adapter implements \async\Adapter
         $scope = \Scope::getCurrent();
         $fiber = new \Fiber(function () use ($f, $task, $scope): void {
             try {
-                $task->settle(true, $scope->run($f));
+                try {
+                    $result = $scope->run($f);
+                } finally {
+                    ActivatingDriver::$sweep !== null && (ActivatingDriver::$sweep)(); // the task may have closed a waited stream
+                }
+                $task->settle(true, $result);
             } catch (\Throwable $e) {
                 $task->settle(false, $e);
                 // Give an awaiter a chance to attach; if nobody did, the loop's error handler sees it.
@@ -158,12 +163,45 @@ final class Adapter implements \async\Adapter
         $this->waitStream('onWritable', $resource, $timeout);
     }
 
+    private array $streamWaits = [];
+    private int $streamSeq = 0;
+    private ?string $sweeper = null;
+
     private function waitStream(string $method, mixed $resource, float $timeout): void
     {
-        $this->wait(static function (\Closure $settle) use ($method, $resource) {
+        $this->wait(function (\Closure $settle) use ($method, $resource) {
             $id = EventLoop::$method($resource, static fn() => $settle(true, null));
-            return static fn() => EventLoop::cancel($id);
+            $key = $this->streamSeq++;
+            $this->streamWaits[$key] = ['resource' => $resource, 'settle' => $settle];
+            // A local fclose() raises no event: while stream waits are pending, re-check every ~10 ms.
+            if ($this->sweeper === null) {
+                $this->sweeper = EventLoop::repeat(0.01, $this->sweepClosed(...));
+                EventLoop::unreference($this->sweeper);
+                ActivatingDriver::$sweep = $this->sweepClosed(...);
+            }
+            return function () use ($id, $key): void {
+                unset($this->streamWaits[$key]);
+                try {
+                    EventLoop::cancel($id);
+                } catch (\Throwable) {
+                }
+                if ($this->streamWaits === [] && $this->sweeper !== null) {
+                    EventLoop::cancel($this->sweeper);
+                    $this->sweeper = null;
+                    ActivatingDriver::$sweep = null;
+                }
+            };
         }, $timeout);
+    }
+
+    /** Wake the waiters of resources that were closed or destroyed; their waits return normally. */
+    private function sweepClosed(): void
+    {
+        foreach ($this->streamWaits as $wait) {
+            if (!\is_resource($wait['resource'])) {
+                ($wait['settle'])(true, null); // cancels the watcher (guarded) and resumes
+            }
+        }
     }
 
     /** May the current context suspend through Revolt's Suspension? */
@@ -282,6 +320,10 @@ final class Adapter implements \async\Adapter
         }
         $run = (new \ReflectionProperty(DriverSuspension::class, 'run'))->getValue($driver->getSuspension());
         while (!$done) {
+            $this->sweepClosed();
+            if ($done) {
+                break;
+            }
             $interrupt = $run();
             if ($interrupt !== null) {
                 $interrupt(); // an uncaught callback exception surfaces here, as with EventLoop::run()
@@ -305,6 +347,10 @@ final class Adapter implements \async\Adapter
             }
             if ($driver->getIdentifiers() === []) {
                 throw new \LogicException('Deadlock: waiting with nothing scheduled');
+            }
+            $this->sweepClosed();
+            if ($done) {
+                return;
             }
             $idle = $prop('microtaskQueue')->isEmpty() && $prop('callbackQueue')->isEmpty();
             $tick->invoke($driver, $idle);

@@ -16,6 +16,23 @@ use function async\{await, await_all, go, readable, run, sleep};
 
 final class AdapterTest extends TestCase
 {
+    public function testLocalCloseUnblocksWaiter(): void
+    {
+        run(function () {
+            [$a, $b] = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
+            $woken = 0;
+            $t1 = go(function () use ($a, &$woken) { readable($a); $woken++; });
+            $t2 = go(function () use ($a, &$woken) { readable($a); $woken++; });
+            sleep(0.02);
+            $start = microtime(true);
+            fclose($a);
+            await($t1);
+            await($t2);
+            $this->assertLessThan(0.1, microtime(true) - $start);
+            $this->assertSame(2, $woken);
+        });
+    }
+
     public function testAmpFutureAwait(): void
     {
         run(function () {
