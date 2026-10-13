@@ -1,0 +1,34 @@
+{
+    "name": "fiber-interop/revolt",
+    "description": "Revolt event loop adapter for fiber-interop/api: go, await, sleep, readable, writable on Revolt (AMPHP v3, ReactPHP).",
+    "type": "library",
+    "license": "MIT",
+    "require": {
+        "php": "^8.1",
+        "fiber-interop/api": "*",
+        "revolt/event-loop": "^1.0"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^10.5 || ^11",
+        "amphp/amp": "^3.0",
+        "react/promise": "^3.0"
+    },
+    "suggest": {
+        "amphp/amp": "await() accepts Amp\\Future natively",
+        "react/promise": "await() accepts React promises natively"
+    },
+    "repositories": [
+        { "type": "path", "url": "../api" },
+        { "type": "path", "url": "../scope" }
+    ],
+    "minimum-stability": "dev",
+    "prefer-stable": true,
+    "autoload": {
+        "psr-4": { "FiberInterop\\Revolt\\": "src/" },
+        "files": ["src/register.php"]
+    },
+    "autoload-dev": {
+        "psr-4": { "FiberInterop\\Revolt\\Tests\\": "tests/" }
+    },
+    "config": { "allow-plugins": {} }
+}
