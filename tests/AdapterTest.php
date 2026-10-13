@@ -265,4 +265,24 @@ final class AdapterTest extends TestCase
             });
         });
     }
+
+    #[\PHPUnit\Framework\Attributes\RunInSeparateProcess]
+    public function testForeignMarkerDecoratorIsNotWrappedAgain(): void
+    {
+        $before = EventLoop::getDriver();
+        $foreign = new class () extends \Revolt\EventLoop\Internal\AbstractDriver implements \Foreign\ScopeActivatingDriver {
+            protected function activate(array $callbacks): void {}
+            protected function dispatch(bool $blocking): void {}
+            protected function deactivate(\Revolt\EventLoop\Internal\DriverCallback $callback): void {}
+            public function getHandle(): mixed { return null; }
+            protected function now(): float { return 0.0; }
+        };
+        EventLoop::setDriver($foreign);
+        try {
+            \FiberInterop\Revolt\Adapter::decorateDriver();
+            $this->assertSame($foreign, EventLoop::getDriver());
+        } finally {
+            EventLoop::setDriver($before);
+        }
+    }
 }

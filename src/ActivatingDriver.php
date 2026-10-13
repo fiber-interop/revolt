@@ -15,11 +15,13 @@ use Revolt\EventLoop\Suspension;
  *
  * @internal
  */
-final class ActivatingDriver implements Driver
+final class ActivatingDriver implements ScopeActivatingDriver
 {
     public function __construct(public readonly Driver $inner)
     {
     }
+
+    public function getInner(): Driver { return $this->inner; }
 
     public static function activate(): void
     {

@@ -35,7 +35,14 @@ final class Adapter implements \async\Adapter
     public static function decorateDriver(): void
     {
         $driver = EventLoop::getDriver();
-        if (!$driver instanceof ActivatingDriver && !$driver->isRunning()) {
+        $decorated = false;
+        foreach (\class_implements($driver) as $interface) {
+            if (\str_ends_with($interface, '\\ScopeActivatingDriver')) {
+                $decorated = true;
+                break;
+            }
+        }
+        if (!$decorated && !$driver->isRunning()) {
             EventLoop::setDriver(new ActivatingDriver($driver));
         }
     }
