@@ -47,8 +47,28 @@ final class Adapter implements \async\Adapter
         }
     }
 
-    /** @var \WeakMap<\Fiber, true> fibers created by service(): their watchers are unreferenced */
+    /** @var \WeakMap<\Fiber, true> fibers created by service() */
     private \WeakMap $services;
+    /** @var array<string, true> watchers a service is currently waiting on */
+    private array $serviceWatchers = [];
+    /** non-service waits in progress: while > 0 a run() is blocked, and the service watchers are referenced */
+    private int $waiting = 0;
+
+    /**
+     * Services are driven while a run() is active (spec §2): while some non-service wait is in progress their
+     * watchers are referenced, so a task awaiting what only a service resolves keeps the loop alive. Otherwise
+     * they are unreferenced and never keep the loop, or a finished run(), alive.
+     */
+    private function referenceServices(bool $ref): void
+    {
+        foreach ($this->serviceWatchers as $id => $_) {
+            try {
+                $ref ? EventLoop::reference($id) : EventLoop::unreference($id);
+            } catch (\Throwable) {
+                unset($this->serviceWatchers[$id]); // cancelled meanwhile
+            }
+        }
+    }
 
     public function go(\Closure $f): object
     {
@@ -56,8 +76,9 @@ final class Adapter implements \async\Adapter
     }
 
     /**
-     * A service is a task whose watchers are unreferenced (EventLoop::unreference), so a sleeping
-     * or I/O-waiting service never keeps the loop, and thus the outermost run(), alive.
+     * A service is a task whose watchers are referenced only while a non-service wait is in progress
+     * (see referenceServices()): a task awaiting what only a service resolves keeps the loop alive, but a
+     * sleeping or I/O-waiting service never keeps the loop, or a finished run(), alive.
      */
     public function service(\Closure $f): object
     {
@@ -268,6 +289,10 @@ final class Adapter implements \async\Adapter
 
         $service = ($fiber = \Fiber::getCurrent()) !== null && isset($this->services[$fiber]);
         $before = $service ? EventLoop::getIdentifiers() : [];
+        $own = [];
+        if (!$service && $this->waiting++ === 0) {
+            $this->referenceServices(true);
+        }
         $cancel = $subscribe($scoped);
         if (!$done && $timeout !== \PHP_FLOAT_MAX) {
             $timer = EventLoop::delay(\max(0.0, $timeout), $inScope(static fn() => $settle(
@@ -277,16 +302,27 @@ final class Adapter implements \async\Adapter
         }
         if ($service) {
             foreach (\array_diff(EventLoop::getIdentifiers(), $before) as $id) {
-                EventLoop::unreference($id);
+                $own[] = $id;
+                $this->serviceWatchers[$id] = true;
+                $this->waiting > 0 ? EventLoop::reference($id) : EventLoop::unreference($id);
             }
         }
 
-        if (!$done) {
-            if ($suspension !== null) {
-                $suspended = true;
-                $suspension->suspend();
-            } else {
-                $this->driveInPlace($done, $nested);
+        try {
+            if (!$done) {
+                if ($suspension !== null) {
+                    $suspended = true;
+                    $suspension->suspend();
+                } else {
+                    $this->driveInPlace($done, $nested);
+                }
+            }
+        } finally {
+            foreach ($own as $id) {
+                unset($this->serviceWatchers[$id]);
+            }
+            if (!$service && --$this->waiting === 0) {
+                $this->referenceServices(false);
             }
         }
 
