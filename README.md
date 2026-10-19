@@ -1,6 +1,6 @@
 # fiber-interop/revolt
 
-Runs the [`fiber-interop/api`](../api) functions (`async\run`, `go`, `service`, `await`, `await_all`,
+Runs the [`fiber-interop/api`](../api) functions (`fiber\run`, `go`, `service`, `await`, `await_all`,
 `await_any`, `sleep`, `readable`, `writable`; every call happens inside `run()`) on the [Revolt](https://revolt.run) event loop, the loop under AMPHP v3
 and usable under ReactPHP.
 
@@ -8,8 +8,8 @@ and usable under ReactPHP.
 
     composer require fiber-interop/revolt
 
-Requiring the package registers the adapter (`async\register(...)` from Composer `files` autoload).
-Nothing else to configure, unless several adapters are installed, then call `async\setup()`.
+Requiring the package registers the adapter (`fiber\register(...)` from Composer `files` autoload).
+Nothing else to configure, unless several adapters are installed, then call `fiber\setup()`.
 
 ## Mapping
 
@@ -30,14 +30,14 @@ Callbacks and task bodies run in the `\Scope` that was current when they were qu
 `await()` natively accepts, when the classes exist:
 
 * `Amp\Future`: uses `$future->await(new TimeoutCancellation($t))`; only that adapter-owned
-  `TimeoutCancellation` becomes `async\TimeoutException`. Any other `CancelledException` (including one from a
+  `TimeoutCancellation` becomes `fiber\TimeoutException`. Any other `CancelledException` (including one from a
   `TimeoutCancellation` the awaited future used itself) becomes `FiberInterop\Revolt\Cancelled`
-  (implements `async\CancelledException`).
+  (implements `fiber\CancelledException`).
 * `React\Promise\PromiseInterface` and any object with `then()` (Guzzle, ...): rejection with a non-Throwable
-  becomes `async\RejectedException`.
+  becomes `fiber\RejectedException`.
 * the `Task` returned by `go()` also has `then()`, so other adapters can await it.
 
-So `Amp\async()` fibers can call `async\sleep()`, `async\await()` etc. directly, and AMPHP v3 code and
+So `Amp\async()` fibers can call `fiber\sleep()`, `fiber\await()` etc. directly, and AMPHP v3 code and
 `fiber-interop` code interleave on the same loop. For ReactPHP, run React on Revolt (`react/event-loop`
 with the Revolt-backed loop) so both share one driver.
 
@@ -92,14 +92,14 @@ from the `Adapter` constructor; it cannot be installed while the loop is running
 * the in-place wait (foreign fibers) calls `activate()` when it returns inside the foreign fiber.
 
 Because this sits in the driver, code that uses Revolt or Amp directly is covered, not only code going through
-`async\`. The in-place driving (`driveNested`) still uses reflection on `AbstractDriver`; the decorator cannot
+`fiber\`. The in-place driving (`driveNested`) still uses reflection on `AbstractDriver`; the decorator cannot
 replace it because the work is calling the driver's private `tick()`/`invokeCallbacks()`, so it stays as is.
 
 Probes (`php probes/<name>.php`, each prints `ok`):
 
-* `scope-api.php` passes: two scopes interleaved with `async\sleep()` keep their own `$_GET`; root is restored.
+* `scope-api.php` passes: two scopes interleaved with `fiber\sleep()` keep their own `$_GET`; root is restored.
 * `scope-loop.php` passes: the same scenario with `EventLoop::delay` + `Suspension`, and with `Amp\async` +
-  `Amp\delay`, without any `async\` call. It only passes because of the decorator.
+  `Amp\delay`, without any `fiber\` call. It only passes because of the decorator.
 * `scope-raw-fiber.php` passes: a plain `new Fiber` inside a scope reads the creator's `$_GET` before and after
   a bare `Fiber::suspend()`. This is the polyfill's "most recently current" fallback, not something the adapter does.
 

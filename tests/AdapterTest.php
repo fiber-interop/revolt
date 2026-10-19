@@ -5,14 +5,14 @@ declare(strict_types=1);
 namespace FiberInterop\Revolt\Tests;
 
 use Amp\Future;
-use async\RejectedException;
-use async\TimeoutException;
+use fiber\RejectedException;
+use fiber\TimeoutException;
 use PHPUnit\Framework\TestCase;
 use React\Promise\Deferred;
 use React\Promise\Promise;
 use Revolt\EventLoop;
 
-use function async\{await, await_all, go, readable, run, sleep};
+use function fiber\{await, await_all, go, readable, run, sleep};
 
 final class AdapterTest extends TestCase
 {
@@ -84,7 +84,7 @@ final class AdapterTest extends TestCase
             try {
                 await($future, 2.0);
                 $this->fail('expected cancellation');
-            } catch (\async\CancelledException $e) {
+            } catch (\fiber\CancelledException $e) {
                 $this->assertNotInstanceOf(TimeoutException::class, $e);
                 $this->assertInstanceOf(\FiberInterop\Revolt\Cancelled::class, $e);
             }
@@ -205,7 +205,7 @@ final class AdapterTest extends TestCase
             $seen = [];
             EventLoop::setErrorHandler(function (\Throwable $e) use (&$seen) { $seen[] = $e->getMessage(); });
             try {
-                \async\service(function () { throw new \RuntimeException('nobody awaits'); });
+                \fiber\service(function () { throw new \RuntimeException('nobody awaits'); });
                 sleep(0.01);
             } finally {
                 EventLoop::setErrorHandler(null);
@@ -319,24 +319,24 @@ final class AdapterTest extends TestCase
     public function testAwaitResolvedOnlyByService(): void
     {
         $t = \microtime(true);
-        $result = \async\run(function () {
-            $timer = new \async\Deferred();
-            \async\service(function () use ($timer) {
-                \async\sleep(0.02);
+        $result = \fiber\run(function () {
+            $timer = new \fiber\Deferred();
+            \fiber\service(function () use ($timer) {
+                \fiber\sleep(0.02);
                 $timer->settle(true, 'slept');
-                \async\sleep(30); // a sleeping service must not keep run() alive
+                \fiber\sleep(30); // a sleeping service must not keep run() alive
             });
             [$a, $b] = \stream_socket_pair(\STREAM_PF_UNIX, \STREAM_SOCK_STREAM, \STREAM_IPPROTO_IP);
-            $io = new \async\Deferred();
-            \async\service(function () use ($a, $io) {
-                \async\readable($a, 5.0);
+            $io = new \fiber\Deferred();
+            \fiber\service(function () use ($a, $io) {
+                \fiber\readable($a, 5.0);
                 $io->settle(true, \fread($a, 10));
             });
-            \async\service(function () use ($b) {
-                \async\sleep(0.02);
+            \fiber\service(function () use ($b) {
+                \fiber\sleep(0.02);
                 \fwrite($b, 'ping');
             });
-            return [\async\await($timer), \async\await($io)];
+            return [\fiber\await($timer), \fiber\await($io)];
         });
         $this->assertSame(['slept', 'ping'], $result);
         $this->assertLessThan(5.0, \microtime(true) - $t);

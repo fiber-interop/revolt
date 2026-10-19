@@ -1,8 +1,8 @@
 <?php
-// Portable: two scopes interleave via async\sleep(); each must keep its own $_GET.
+// Portable: two scopes interleave via fiber\sleep(); each must keep its own $_GET.
 require __DIR__ . '/../vendor/autoload.php';
 
-use function async\{go, await, run, sleep};
+use function fiber\{go, await, run, sleep};
 
 $fail = [];
 run(function () use (&$fail) {

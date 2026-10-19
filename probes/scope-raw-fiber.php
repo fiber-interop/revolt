@@ -2,7 +2,7 @@
 // Portable: a plain Fiber inside a scope sees the creator's $_GET before and after a bare Fiber::suspend().
 require __DIR__ . '/../vendor/autoload.php';
 
-use function async\run;
+use function fiber\run;
 
 $fail = [];
 run(function () use (&$fail) {

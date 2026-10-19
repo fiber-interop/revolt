@@ -4,8 +4,8 @@ declare(strict_types=1);
 
 namespace FiberInterop\Revolt;
 
-use async\RejectedException;
-use async\Timeout;
+use fiber\RejectedException;
+use fiber\Timeout;
 use Revolt\EventLoop;
 use Revolt\EventLoop\Internal\DriverSuspension;
 
@@ -16,7 +16,7 @@ use Revolt\EventLoop\Internal\DriverSuspension;
  *  - {main}, a fiber created by go(), or a fiber running inside a Revolt callback: Revolt Suspension.
  *  - any other fiber (one nobody's loop owns): the loop is driven in place, from inside that fiber.
  */
-final class Adapter implements \async\Adapter
+final class Adapter implements \fiber\Adapter
 {
     /** @var \WeakMap<\Fiber, true> fibers created by go() */
     private \WeakMap $own;
