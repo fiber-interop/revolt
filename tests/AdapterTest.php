@@ -341,4 +341,44 @@ final class AdapterTest extends TestCase
         $this->assertSame(['slept', 'ping'], $result);
         $this->assertLessThan(5.0, \microtime(true) - $t);
     }
+
+    public function testCancelAmpFutureAwaitThrowsTheReason(): void
+    {
+        run(function () {
+            $future = \Amp\async(function () { \Amp\delay(0.05); return 'late'; });
+            foreach ([\PHP_FLOAT_MAX, 5.0] as $timeout) { // with and without our own TimeoutCancellation
+                $t = go(fn() => await($future, $timeout));
+                sleep(0.01);
+                $reason = new \fiber\Cancelled('stop');
+                \fiber\cancel($t, $reason);
+                try {
+                    await($t);
+                    $this->fail('await returned');
+                } catch (\fiber\CancelledException $e) {
+                    $this->assertSame($reason, $e);
+                }
+            }
+            $this->assertSame('late', $future->await()); // the future itself was not cancelled
+        });
+    }
+
+    public function testCancelledWaitIsNotResumedAgain(): void
+    {
+        run(function () {
+            $d = new \fiber\Deferred();
+            $t = go(function () use ($d) {
+                try {
+                    await($d);
+                } catch (\fiber\CancelledException $e) {
+                    return 'cancelled';
+                }
+                return 'resumed';
+            });
+            sleep(0.01);
+            \fiber\cancel($t);
+            $d->resolve('late'); // must not resume the task's finished wait (Revolt would raise an Error)
+            sleep(0.02);
+            $this->assertSame('cancelled', await($t));
+        });
+    }
 }

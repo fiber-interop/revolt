@@ -18,7 +18,7 @@ use Revolt\EventLoop\Internal\DriverSuspension;
  */
 final class Adapter implements \fiber\Adapter
 {
-    /** @var \WeakMap<\Fiber, true> fibers created by go() */
+    /** @var \WeakMap<\Fiber, Task> fibers created by go() and service(), with their handles */
     private \WeakMap $own;
 
     public function __construct()
@@ -102,10 +102,25 @@ final class Adapter implements \fiber\Adapter
                 });
             }
         });
-        $this->own[$fiber] = true;
+        $this->own[$fiber] = $task;
         $service && $this->services[$fiber] = true;
         EventLoop::queue(static fn() => $scope->run(static fn() => $fiber->start()));
         return $task;
+    }
+
+    /**
+     * Make the wait $task is suspended in throw $reason (the same object). The api calls this only while
+     * $task, a handle go() or service() returned, waits in sleep(), await(), readable() or writable().
+     * Such a task always waits through a Revolt Suspension (or Amp\Future::await() with a per-wait
+     * DeferredCancellation), and that wait registers its abort on the Task. A fiber the adapter did not
+     * create, waiting in place inside a task, is not that task's wait: the task is then not waiting, and
+     * this is a no-op (the api throws the reason from the task's next wait).
+     */
+    public function cancel(object $task, \fiber\CancelledException $reason): void
+    {
+        if ($task instanceof Task && $task->abort !== null) {
+            ($task->abort)($reason);
+        }
     }
 
     public function canAwait(object $o): bool
@@ -149,15 +164,31 @@ final class Adapter implements \fiber\Adapter
     private function awaitAmp(\Amp\Future $future, float $timeout): mixed
     {
         $cancellation = $timeout === \PHP_FLOAT_MAX ? null : new \Amp\TimeoutCancellation($timeout);
+        $fiber = \Fiber::getCurrent();
+        $task = $fiber === null ? null : ($this->own[$fiber] ?? null);
+        $deferred = null;
+        if ($task !== null) {
+            $deferred = new \Amp\DeferredCancellation();
+            $task->abort = static fn(\Throwable $reason) => $deferred->cancel($reason);
+        }
         try {
-            return $future->await($cancellation);
+            return $future->await(match (true) {
+                $deferred === null => $cancellation,
+                $cancellation === null => $deferred->getCancellation(),
+                default => new \Amp\CompositeCancellation($cancellation, $deferred->getCancellation()),
+            });
         } catch (\Amp\CancelledException $e) {
+            if ($deferred?->isCancelled() && $e->getPrevious() instanceof \fiber\CancelledException) {
+                throw $e->getPrevious(); // fiber\cancel()'s reason
+            }
             // Only our own TimeoutCancellation is a Timeout; any other CancelledException (even one caused by
             // a TimeoutCancellation inside the awaited future) is a Cancelled.
             if ($cancellation !== null && $cancellation->isRequested() && $e->getPrevious() instanceof \Amp\TimeoutException) {
                 throw new Timeout(\sprintf('Timed out after %.3fs', $timeout), 0, $e);
             }
             throw new Cancelled($e->getMessage(), 0, $e);
+        } finally {
+            $task !== null && $task->abort = null;
         }
     }
 
@@ -279,7 +310,7 @@ final class Adapter implements \fiber\Adapter
                 EventLoop::cancel($timer);
             }
             if ($suspension !== null) {
-                $suspended && $suspension->resume();
+                $suspended && ($ok ? $suspension->resume() : $suspension->throw($value));
             } elseif (!$nested) {
                 EventLoop::stop(); // let the in-place driver loop return
             }
@@ -287,7 +318,10 @@ final class Adapter implements \fiber\Adapter
         $inScope = static fn(\Closure $cb): \Closure => static fn(...$a) => $scope->run($cb, ...$a);
         $scoped = static fn(bool $ok, mixed $value) => $scope->run($settle, $ok, $value);
 
-        $service = ($fiber = \Fiber::getCurrent()) !== null && isset($this->services[$fiber]);
+        $fiber = \Fiber::getCurrent();
+        $service = $fiber !== null && isset($this->services[$fiber]);
+        // fiber\cancel(): settle with the reason, which drops the watcher and timer and throws it into the task
+        $task = $suspension !== null && $fiber !== null ? ($this->own[$fiber] ?? null) : null;
         $before = $service ? EventLoop::getIdentifiers() : [];
         $own = [];
         if (!$service && $this->waiting++ === 0) {
@@ -312,12 +346,14 @@ final class Adapter implements \fiber\Adapter
             if (!$done) {
                 if ($suspension !== null) {
                     $suspended = true;
+                    $task !== null && $task->abort = static fn(\Throwable $reason) => $scoped(false, $reason);
                     $suspension->suspend();
                 } else {
                     $this->driveInPlace($done, $nested);
                 }
             }
         } finally {
+            $task !== null && $task->abort = null;
             foreach ($own as $id) {
                 unset($this->serviceWatchers[$id]);
             }

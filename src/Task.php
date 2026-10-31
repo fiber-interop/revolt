@@ -11,6 +11,8 @@ namespace FiberInterop\Revolt;
 final class Task
 {
     public bool $handled = false;
+    /** @var (\Closure(\Throwable): void)|null ends the task's current wait with a reason; set only while it waits */
+    public ?\Closure $abort = null;
     /** @var array{bool, mixed}|null [ok, value-or-throwable] */
     private ?array $result = null;
     /** @var list<\Closure(bool, mixed): void> */

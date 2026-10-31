@@ -1,7 +1,7 @@
 # fiber-interop/revolt
 
 Runs the [`fiber-interop/api`](../api) functions (`fiber\run`, `go`, `service`, `await`, `await_all`,
-`await_any`, `sleep`, `readable`, `writable`; every call happens inside `run()`) on the [Revolt](https://revolt.run) event loop, the loop under AMPHP v3
+`await_any`, `sleep`, `readable`, `writable`, `cancel`; every call happens inside `run()`) on the [Revolt](https://revolt.run) event loop, the loop under AMPHP v3
 and usable under ReactPHP.
 
 ## Install
@@ -21,6 +21,7 @@ Nothing else to configure, unless several adapters are installed, then call `fib
 | `sleep()`          | `EventLoop::delay()`                                                |
 | `readable/writable`| `EventLoop::onReadable/onWritable`, cancelled after one firing or on timeout; any number of fibers may wait on one stream |
 | timeouts           | `EventLoop::delay()`, cancelled on completion; the awaited task keeps running, a late result is ignored |
+| `cancel()`         | the task's current wait is settled with the reason: its watcher, timer and subscription are cancelled and `$suspension->throw($reason)` resumes the task; a later wake-up of that wait is ignored. An `Amp\Future` wait gets a per-wait `DeferredCancellation`, cancelled with the reason, which `await()` rethrows (the future itself keeps running) |
 | unawaited failure  | rethrown from a queued callback, so it reaches `EventLoop::setErrorHandler()` (uncaught: the loop dies, like any Revolt error) |
 
 Callbacks and task bodies run in the `\Scope` that was current when they were queued.
@@ -74,6 +75,9 @@ Revolt 1.x internals) and returns when the awaited thing completes, without susp
   fiber (also via reflection). Other tasks keep running while the foreign fiber waits.
 * Nested in-place waits across two foreign fibers are not supported.
 * In-place waiting on an `Amp\Future` observes it through `map()/catch()` instead of `Future::await()`.
+* `cancel()` only ends waits made through a `Suspension`. A task is never waiting in place (its own fiber always
+  suspends), so this covers every wait the api asks it to cancel; a foreign fiber waiting in place inside a task is
+  not that task's wait, and the reason is thrown from the task's next wait instead.
 * Waiting with nothing scheduled in place throws `LogicException('Deadlock ...')`. In {main}, Revolt itself throws.
 
 ## Scope state
